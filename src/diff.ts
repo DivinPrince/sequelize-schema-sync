@@ -128,33 +128,78 @@ export class SchemaDiffer {
 
   private async getExistingTables(): Promise<string[]> {
     try {
-      const tables = await this.queryInterface.showAllTables();
-      this.log('Raw tables from database:', tables);
+      console.log(`[DEBUG] Checking existing tables for ${this.dialect}...`);
       
-      // Handle different return formats from different databases
-      let tableNames: string[];
+      let tables: string[] = [];
       
-      if (Array.isArray(tables)) {
-        // PostgreSQL and MySQL return arrays
-        tableNames = tables.map(table => {
-          if (typeof table === 'string') return table;
-          if (typeof table === 'object' && table !== null) {
-            // Handle objects like { tableName: 'users' } or { table_name: 'users' }
-            if (typeof table === 'object' && table !== null) {
-              return (table as any).tableName || (table as any).table_name || (table as any).name || String(table);
-            }
-            return String(table);
-          }
-          return String(table);
-        });
-      } else {
-        tableNames = [];
+      // Try multiple approaches to get table names
+      if (this.dialect === 'postgres') {
+        // Direct PostgreSQL query - most reliable
+        try {
+          const [results] = await this.sequelize.query(`
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public' 
+            AND table_type = 'BASE TABLE'
+            ORDER BY table_name;
+          `);
+          tables = (results as any[]).map(row => row.table_name);
+          console.log(`[DEBUG] PostgreSQL direct query found ${tables.length} tables:`, tables);
+        } catch (error) {
+          console.log(`[DEBUG] PostgreSQL direct query failed:`, typeof error === 'object' && error !== null && 'message' in error ? (error as any).message : error);
+        }
       }
       
-      const filteredTables = this.dialectHandler.filterSystemTables(tableNames);
-      this.log('Filtered existing tables:', filteredTables);
+      // Fallback to showAllTables if direct query didn't work or for other databases
+      if (tables.length === 0) {
+        try {
+          const rawTables = await this.queryInterface.showAllTables();
+          console.log(`[DEBUG] showAllTables() returned:`, rawTables);
+          console.log(`[DEBUG] Type: ${typeof rawTables}, IsArray: ${Array.isArray(rawTables)}`);
+          
+          if (Array.isArray(rawTables)) {
+            tables = rawTables.map(table => {
+              if (typeof table === 'string') return table;
+              if (typeof table === 'object' && table !== null) {
+                if (typeof table === 'object' && table !== null) {
+                  return (table as any).tableName || (table as any).table_name || (table as any).name || String(table);
+                }
+                return String(table);
+              }
+              return String(table);
+            });
+          }
+          console.log(`[DEBUG] Processed showAllTables result:`, tables);
+        } catch (error) {
+          console.log(`[DEBUG] showAllTables() failed:`, typeof error === 'object' && error !== null && 'message' in error ? (error as any).message : error);
+        }
+      }
+      
+      // Filter system tables
+      const filteredTables = this.dialectHandler.filterSystemTables(tables);
+      console.log(`[DEBUG] After filtering system tables:`, filteredTables);
+      
+      // Final validation - check if we can describe at least one table
+      if (filteredTables.length > 0) {
+        try {
+          const testTable = filteredTables[0];
+          const description = await this.queryInterface.describeTable(testTable);
+          console.log(`[DEBUG] Successfully described table ${testTable}:`, Object.keys(description));
+        } catch (error) {
+          console.log(`[DEBUG] Warning: Could not describe table ${filteredTables[0]}:`, typeof error === 'object' && error !== null && 'message' in error ? (error as any).message : error);
+          // If we can't describe any table, maybe they don't exist
+          if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as any).message === 'string') {
+            const errMsg = (error as any).message;
+            if (errMsg.includes('does not exist') || errMsg.includes('doesn\'t exist')) {
+              console.log(`[DEBUG] Tables don't seem to exist, returning empty array`);
+              return [];
+            }
+          }
+        }
+      }
       
       return filteredTables;
+      
     } catch (error) {
       console.warn('Could not retrieve existing tables:', error);
       return [];
