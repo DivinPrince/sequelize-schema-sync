@@ -297,10 +297,22 @@ export class SchemaDiffer {
     // Enhanced type comparison with special handling for common mismatches
     const existingType = this.dialectHandler.normalizeType(this.getTypeString(existingColumn.type));
     const modelType = this.dialectHandler.normalizeType(this.getTypeString(modelColumn.type));
-    
-    // Special handling for common PostgreSQL vs Sequelize type mismatches
-    if (!this.areTypesEquivalent(existingType, modelType, existingColumn, modelColumn)) {
-      this.log(`Type difference: existing=${existingType}, model=${modelType}`);
+
+    // Treat STRING/ENUM/VARCHAR as equivalent unless enum values differ
+    const stringTypes = ['varchar', 'varchar(255)', 'string', 'enum', 'enum_or_varchar'];
+    if (stringTypes.includes(existingType) && stringTypes.includes(modelType)) {
+      // If both are enums, compare values
+      if (modelType === 'enum' && existingType === 'enum' && modelColumn.values && existingColumn.special) {
+        const modelValues = modelColumn.values.map(String);
+        const dbValues = Array.isArray(existingColumn.special) ? existingColumn.special.map(String) : [];
+        if (modelValues.length !== dbValues.length || !modelValues.every((v: string) => dbValues.includes(v))) {
+          this.log(`[POSTGRES] Enum values differ: model=${modelValues}, db=${dbValues}`);
+          return true;
+        }
+      }
+      // Otherwise, treat as equivalent
+    } else if (!this.areTypesEquivalent(existingType, modelType, existingColumn, modelColumn)) {
+      this.log(`[POSTGRES] Type difference: existing=${existingType}, model=${modelType}`);
       return true;
     }
 
@@ -339,11 +351,15 @@ export class SchemaDiffer {
 
     // Default value comparison - skip for auto-increment and primary key columns
     if (!existingAI && !modelAI && !existingPK) {
-      const existingDefault = this.dialectHandler.normalizeDefaultValue(existingColumn.defaultValue);
-      const modelDefault = this.dialectHandler.normalizeDefaultValue(modelColumn.defaultValue);
-      
+      let existingDefault = this.dialectHandler.normalizeDefaultValue(existingColumn.defaultValue);
+      let modelDefault = this.dialectHandler.normalizeDefaultValue(modelColumn.defaultValue);
+      // Treat null, undefined, empty object, and missing as equivalent
+  const isEmpty = (v: any) => v === null || v === undefined || (typeof v === 'object' && v && Object.keys(v).length === 0);
+      if (isEmpty(existingDefault) && isEmpty(modelDefault)) {
+        existingDefault = modelDefault = null;
+      }
       if (existingDefault !== modelDefault) {
-        this.log(`Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
+        this.log(`[POSTGRES] Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
         return true;
       }
     }
