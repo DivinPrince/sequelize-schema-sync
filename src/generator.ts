@@ -164,9 +164,32 @@ export class MigrationGenerator {
     
     // Default value
     if (columnDef.defaultValue !== undefined) {
-      const defaultStr = typeof columnDef.defaultValue === 'string' 
-        ? `'${columnDef.defaultValue}'` 
-        : String(columnDef.defaultValue);
+      let defaultStr: string;
+      
+      // Check if defaultValue is a Date object (from new Date())
+      if (columnDef.defaultValue instanceof Date) {
+        // Convert Date objects to DataTypes.NOW for proper SQL generation
+        defaultStr = 'DataTypes.NOW';
+      } else if (typeof columnDef.defaultValue === 'string') {
+        // Check if it's a date string that looks like it came from new Date()
+        if (columnDef.defaultValue.match(/^\w{3} \w{3} \d{2} \d{4} \d{2}:\d{2}:\d{2}/)) {
+          // This looks like a serialized Date object, convert to DataTypes.NOW
+          defaultStr = 'DataTypes.NOW';
+        } else {
+          defaultStr = `'${columnDef.defaultValue}'`;
+        }
+      } else if (typeof columnDef.defaultValue === 'function') {
+        // Handle function references like DataTypes.NOW
+        const funcStr = String(columnDef.defaultValue);
+        if (funcStr.includes('NOW') || funcStr.includes('CURRENT_TIMESTAMP')) {
+          defaultStr = 'DataTypes.NOW';
+        } else {
+          defaultStr = String(columnDef.defaultValue);
+        }
+      } else {
+        defaultStr = String(columnDef.defaultValue);
+      }
+      
       parts.push(`defaultValue: ${defaultStr}`);
     }
     
