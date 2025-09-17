@@ -47,22 +47,41 @@ export class SchemaDiffer {
     }
   }
 
+  // Type-safe helper to get table name from model
+  private getTableName(model: ModelStatic<Model>): string {
+    const modelAny = model as any;
+    return modelAny.tableName || modelAny.getTableName?.() || model.name;
+  }
+
+  // Type-safe helper to get raw attributes from model
+  private getRawAttributes(model: ModelStatic<Model>): any {
+    const modelAny = model as any;
+    return modelAny.rawAttributes || modelAny.attributes || {};
+  }
+
   async generateDiff(): Promise<SchemaDiff> {
     const differences: TableDifference[] = [];
     
     // Load models using the new loader
     const models = await loadModelsFromConfig(this.config);
-    this.log(`Loaded ${models.length} models:`, models.map(m => m.tableName));
+    this.log(`Loaded ${models.length} models:`, models.map(m => (m as any).tableName || m.name));
     
     // Get current database schema
     const existingTables = await this.getExistingTables();
     this.log(`Found ${existingTables.length} existing tables:`, existingTables);
     
-    const modelTableNames = models.map(model => model.tableName);
+    const modelTableNames = models.map(model => (model as any).tableName || model.name);
+    this.log(`Model table names:`, modelTableNames);
+    
+    // Debug: Show table name comparison
+    for (const modelTable of modelTableNames) {
+      const exists = existingTables.includes(modelTable);
+      this.log(`Table ${modelTable} exists in DB: ${exists}`);
+    }
     
     // Check for new tables (models that don't exist in DB)
     for (const model of models) {
-      const tableName = model.tableName;
+      const tableName = (model as any).tableName || model.name;
       
       if (!existingTables.includes(tableName)) {
         this.log(`Table ${tableName} does not exist, will create`);
@@ -110,7 +129,32 @@ export class SchemaDiffer {
   private async getExistingTables(): Promise<string[]> {
     try {
       const tables = await this.queryInterface.showAllTables();
-      return this.dialectHandler.filterSystemTables(tables.map(t => String(t)));
+      this.log('Raw tables from database:', tables);
+      
+      // Handle different return formats from different databases
+      let tableNames: string[];
+      
+      if (Array.isArray(tables)) {
+        // PostgreSQL and MySQL return arrays
+        tableNames = tables.map(table => {
+          if (typeof table === 'string') return table;
+          if (typeof table === 'object' && table !== null) {
+            // Handle objects like { tableName: 'users' } or { table_name: 'users' }
+            if (typeof table === 'object' && table !== null) {
+              return (table as any).tableName || (table as any).table_name || (table as any).name || String(table);
+            }
+            return String(table);
+          }
+          return String(table);
+        });
+      } else {
+        tableNames = [];
+      }
+      
+      const filteredTables = this.dialectHandler.filterSystemTables(tableNames);
+      this.log('Filtered existing tables:', filteredTables);
+      
+      return filteredTables;
     } catch (error) {
       console.warn('Could not retrieve existing tables:', error);
       return [];
@@ -129,12 +173,12 @@ export class SchemaDiffer {
   }
 
   private async compareTableColumns(model: ModelStatic<Model>): Promise<ColumnDifference[]> {
-    const tableName = model.tableName;
+    const tableName = (model as any).tableName || model.name;
     const differences: ColumnDifference[] = [];
     
     try {
       const existingColumns = await this.queryInterface.describeTable(tableName);
-      const modelAttributes = model.rawAttributes;
+      const modelAttributes = (model as any).rawAttributes;
       
       this.log(`Comparing columns for table ${tableName}`);
       this.log(`DB columns:`, Object.keys(existingColumns));
@@ -423,7 +467,9 @@ class PostgreSQLHandler implements DatabaseDialectHandler {
       const lowerTable = table.toLowerCase();
       return !lowerTable.startsWith('pg_') &&
              lowerTable !== 'information_schema' &&
-             !lowerTable.includes('sequelizemeta');
+             !lowerTable.includes('sequelizemeta') &&
+             !lowerTable.startsWith('sql_') && // Additional PostgreSQL system tables
+             lowerTable !== 'dual'; // Oracle dual table sometimes appears
     });
   }
 
