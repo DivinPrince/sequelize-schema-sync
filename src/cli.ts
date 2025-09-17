@@ -6,7 +6,7 @@ import { resolve, join } from 'path';
 import { existsSync } from 'fs';
 import { SchemaSyncConfig } from './types';
 import { generateMigration } from './generator';
-import { runMigrations, rollbackMigration } from './migrator';
+import { runMigrations, rollbackMigration, getMigrationStatus } from './migrator';
 
 const program = new Command();
 
@@ -138,9 +138,11 @@ program
       const config = await loadConfig();
       console.log(chalk.green('✅ Configuration loaded'));
       
-      // TODO: Implement migration status check
       console.log(chalk.blue('📊 Migration status:'));
-      console.log(chalk.yellow('Status command not yet implemented'));
+      const status = await getMigrationStatus(config);
+      
+      console.log(chalk.blue('Executed migrations:'), status.executed);
+      console.log(chalk.blue('Pending migrations:'), status.pending);
     } catch (error) {
       console.error(chalk.red('❌ Failed to check status:'), error);
       process.exit(1);
@@ -163,10 +165,6 @@ program
     const configTemplate = `import { Sequelize } from 'sequelize';
 import { SchemaSyncConfig } from 'sequelize-schema-sync';
 
-// Import your models here
-// import { User } from './models/User';
-// import { Post } from './models/Post';
-
 const sequelize = new Sequelize({
   dialect: 'sqlite',
   storage: './database.sqlite',
@@ -175,11 +173,13 @@ const sequelize = new Sequelize({
 
 const config: SchemaSyncConfig = {
   sequelize,
-  models: [
-    // Add your models here
-    // User,
-    // Post,
-  ],
+  
+  // Option 1: Provide models array directly (existing approach)
+  // models: [User, Post],
+  
+  // Option 2: Provide models directory path (new approach)
+  modelsPath: './models',
+  
   migrationsPath: './migrations',
 };
 
@@ -193,6 +193,5 @@ export default config;
     console.log(chalk.blue('  2. Import and add your models to the models array'));
   });
 
-if (require.main === module) {
-  program.parse();
-}
+// Always parse when this file is executed
+program.parse();

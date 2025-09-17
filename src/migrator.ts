@@ -1,6 +1,8 @@
 import { Umzug, SequelizeStorage } from 'umzug';
 import { resolve } from 'path';
 import { QueryInterface } from 'sequelize';
+import { readdirSync } from 'fs';
+import { join } from 'path';
 import { SchemaSyncConfig } from './types';
 
 export class MigrationRunner {
@@ -15,24 +17,46 @@ export class MigrationRunner {
   private createUmzug(): Umzug<QueryInterface> {
     const migrationsPath = resolve(this.config.migrationsPath || './migrations');
     
+    // Register ts-node if we have TypeScript files
+    try {
+      require('ts-node').register({
+        compilerOptions: {
+          module: 'commonjs',
+          esModuleInterop: true,
+          allowSyntheticDefaultImports: true,
+          strict: false, // Allow implicit any types for dynamic loading
+          skipLibCheck: true
+        },
+        transpileOnly: true, // Skip type checking for faster compilation
+      });
+    } catch {
+      // ts-node not available, that's okay for JS files
+    }
+    
+    // Get all migration files manually
+    let migrationFiles: string[] = [];
+    try {
+      migrationFiles = readdirSync(migrationsPath)
+        .filter(file => file.endsWith('.ts') || file.endsWith('.js'))
+        .map(file => join(migrationsPath, file));
+    } catch (error) {
+      // Migrations directory doesn't exist yet - that's okay
+    }
+    
     return new Umzug<QueryInterface>({
-      migrations: {
-        glob: [`${migrationsPath}/*.{ts,js}`, { cwd: process.cwd() }],
-        resolve: ({ name, path, context }) => {
-          // Handle both TypeScript and JavaScript migration files
-          const migration = require(path!);
-          
-          return {
-            name,
-            up: async () => {
-              await migration.up(context);
-            },
-            down: async () => {
-              await migration.down(context);
-            }
-          };
+      migrations: migrationFiles.map(file => ({
+        name: file.split(/[/\\]/).pop()!.replace(/\.(ts|js)$/, ''),
+        up: async ({ context }: { context: QueryInterface }) => {
+          delete require.cache[file];
+          const migration = require(file);
+          await migration.up(context);
+        },
+        down: async ({ context }: { context: QueryInterface }) => {
+          delete require.cache[file];
+          const migration = require(file);
+          await migration.down(context);
         }
-      },
+      })),
       context: this.config.sequelize.getQueryInterface(),
       storage: new SequelizeStorage({
         sequelize: this.config.sequelize,

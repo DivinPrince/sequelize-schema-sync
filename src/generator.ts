@@ -191,6 +191,7 @@ export class MigrationGenerator {
       'DOUBLE': 'DataTypes.DOUBLE',
       'DECIMAL': 'DataTypes.DECIMAL',
       'BOOLEAN': 'DataTypes.BOOLEAN',
+      'TINYINT(1)': 'DataTypes.BOOLEAN',
       'DATE': 'DataTypes.DATE',
       'DATEONLY': 'DataTypes.DATEONLY',
       'TIME': 'DataTypes.TIME',

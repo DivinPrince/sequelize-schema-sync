@@ -1,26 +1,30 @@
 import { Sequelize, ModelStatic, Model, QueryInterface, DataTypes } from 'sequelize';
 import { SchemaSyncConfig, SchemaDiff, TableDifference, ColumnDifference } from './types';
+import { loadModelsFromConfig } from './model-loader';
 
 export class SchemaDiffer {
   private sequelize: Sequelize;
-  private models: ModelStatic<Model>[];
+  private config: SchemaSyncConfig;
   private queryInterface: QueryInterface;
 
   constructor(config: SchemaSyncConfig) {
     this.sequelize = config.sequelize;
-    this.models = config.models;
+    this.config = config;
     this.queryInterface = this.sequelize.getQueryInterface();
   }
 
   async generateDiff(): Promise<SchemaDiff> {
     const differences: TableDifference[] = [];
     
+    // Load models using the new loader
+    const models = await loadModelsFromConfig(this.config);
+    
     // Get current database schema
     const existingTables = await this.getExistingTables();
-    const modelTableNames = this.models.map(model => model.tableName);
+    const modelTableNames = models.map(model => model.tableName);
     
     // Check for new tables (models that don't exist in DB)
-    for (const model of this.models) {
+    for (const model of models) {
       const tableName = model.tableName;
       
       if (!existingTables.includes(tableName)) {
@@ -63,7 +67,13 @@ export class SchemaDiffer {
   private async getExistingTables(): Promise<string[]> {
     try {
       const tables = await this.queryInterface.showAllTables();
-      return tables;
+      // Filter out system/migration tables that should be ignored
+      return tables.filter(table => {
+        const tableName = table.toLowerCase();
+        return !tableName.includes('sequelizemeta') && 
+               !tableName.includes('sqlite_sequence') &&
+               !tableName.startsWith('sqlite_');
+      });
     } catch (error) {
       console.warn('Could not retrieve existing tables:', error);
       return [];
@@ -178,8 +188,11 @@ export class SchemaDiffer {
       return true;
     }
     
-    // Compare default values
-    if (existingColumn.defaultValue !== modelColumn.defaultValue) {
+    // Compare default values with normalization
+    const existingDefault = this.normalizeDefaultValue(existingColumn.defaultValue);
+    const modelDefault = this.normalizeDefaultValue(modelColumn.defaultValue);
+    
+    if (existingDefault !== modelDefault) {
       return true;
     }
     
@@ -196,6 +209,29 @@ export class SchemaDiffer {
     }
     
     return String(type).toLowerCase();
+  }
+
+  private normalizeDefaultValue(value: any): any {
+    // Handle undefined/null
+    if (value === undefined || value === null) {
+      return null;
+    }
+    
+    // Convert string numbers to numbers
+    if (typeof value === 'string') {
+      // Check if it's a numeric string
+      if (/^\d+$/.test(value)) {
+        return parseInt(value, 10);
+      }
+      // Check if it's "true" or "false"
+      if (value.toLowerCase() === 'true') return true;
+      if (value.toLowerCase() === 'false') return false;
+      // Check for boolean-like numbers
+      if (value === '1') return true;
+      if (value === '0') return false;
+    }
+    
+    return value;
   }
 }
 

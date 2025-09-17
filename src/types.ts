@@ -2,9 +2,14 @@ import { Sequelize, Model, DataTypes, ModelStatic } from 'sequelize';
 
 export interface SchemaSyncConfig {
   sequelize: Sequelize;
-  models: ModelStatic<Model>[];
+  models?: ModelStatic<Model>[]; // Array of model classes (existing approach)
+  modelsPath?: string; // Path to models directory (new approach)
   migrationsPath?: string;
   configPath?: string;
+}
+
+export interface ModelLoader {
+  (sequelize: Sequelize): ModelStatic<Model>;
 }
 
 export interface ColumnDifference {
