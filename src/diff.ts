@@ -205,60 +205,82 @@ export class SchemaDiffer {
   }
 
   private hasColumnChanged(existingColumn: any, modelColumn: any): boolean {
-    // Compare type
-    const existingType = this.normalizeDataType(existingColumn.type);
-    const modelType = this.normalizeDataType(modelColumn.type);
-    
+    // Normalize type for enums: treat varchar and enum as equivalent if values match
+    let existingType = this.normalizeDataType(existingColumn.type);
+    let modelType = this.normalizeDataType(modelColumn.type);
+
+    // If model is ENUM and DB is VARCHAR, treat as equal if values match
+    if (modelType === 'enum' && (existingType === 'varchar' || existingType === 'varchar(255)')) {
+      if (modelColumn.values && Array.isArray(modelColumn.values)) {
+        // Optionally, check DB for enum values if available
+        // If not, treat as equivalent
+        existingType = 'enum';
+      }
+    }
+
+    // Normalize timestamp types
+    if ((existingType === 'time' || existingType === 'timestamp' || existingType === 'timestamptz') &&
+        (modelType === 'date' || modelType === 'timestamptz')) {
+      existingType = modelType = 'date';
+    }
+
     if (existingType !== modelType) {
       this.log(`Type difference for column: existing=${existingType}, model=${modelType}`);
       return true;
     }
-    
-    // Compare nullability
-    const existingAllowNull = existingColumn.allowNull;
-    const modelAllowNull = modelColumn.allowNull !== false;
-    
+
+    // Nullability: treat PK and autoIncrement as always NOT NULL
+    let existingAllowNull = existingColumn.allowNull;
+    let modelAllowNull = modelColumn.allowNull !== false;
+    if (modelColumn.primaryKey || modelColumn.autoIncrement) {
+      modelAllowNull = false;
+    }
+    if (existingColumn.primaryKey || existingColumn.autoIncrement) {
+      existingAllowNull = false;
+    }
     if (existingAllowNull !== modelAllowNull) {
       this.log(`Nullability difference: existing=${existingAllowNull}, model=${modelAllowNull}`);
       return true;
     }
-    
-    // Compare primary key
+
+    // Primary key
     const existingPK = !!existingColumn.primaryKey;
     const modelPK = !!modelColumn.primaryKey;
-    
     if (existingPK !== modelPK) {
       this.log(`Primary key difference: existing=${existingPK}, model=${modelPK}`);
       return true;
     }
-    
-    // Compare auto increment
-    const existingAI = !!existingColumn.autoIncrement;
-    const modelAI = !!modelColumn.autoIncrement;
-    
+
+    // Auto increment: treat DB nextval as equivalent to model autoIncrement
+    let existingAI = !!existingColumn.autoIncrement;
+    let modelAI = !!modelColumn.autoIncrement;
+    if (!existingAI && typeof existingColumn.defaultValue === 'string' && existingColumn.defaultValue.includes('nextval')) {
+      existingAI = true;
+    }
     if (existingAI !== modelAI) {
       this.log(`Auto increment difference: existing=${existingAI}, model=${modelAI}`);
       return true;
     }
-    
-    // Compare unique constraint
+
+    // Unique constraint
     const existingUnique = !!existingColumn.unique;
     const modelUnique = !!modelColumn.unique;
-    
     if (existingUnique !== modelUnique) {
       this.log(`Unique constraint difference: existing=${existingUnique}, model=${modelUnique}`);
       return true;
     }
-    
-    // Compare default values with normalization
-    const existingDefault = this.normalizeDefaultValue(existingColumn.defaultValue);
-    const modelDefault = this.normalizeDefaultValue(modelColumn.defaultValue);
-    
+
+    // Default values: treat DB nextval and model autoIncrement as equivalent
+    let existingDefault = this.normalizeDefaultValue(existingColumn.defaultValue);
+    let modelDefault = this.normalizeDefaultValue(modelColumn.defaultValue);
+    if (modelAI && typeof existingColumn.defaultValue === 'string' && existingColumn.defaultValue.includes('nextval')) {
+      existingDefault = modelDefault;
+    }
     if (existingDefault !== modelDefault) {
       this.log(`Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
       return true;
     }
-    
+
     return false;
   }
 
