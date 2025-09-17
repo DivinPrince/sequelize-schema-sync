@@ -57,12 +57,50 @@ program
   .command('generate')
   .description('Generate a new migration based on model changes')
   .option('-n, --name <name>', 'Migration name')
+  .option('--dry-run', 'Show what changes would be made without generating files')
   .action(async (options) => {
     console.log(chalk.blue('🔄 Loading configuration...'));
     
     try {
       const config = await loadConfig();
       console.log(chalk.green('✅ Configuration loaded'));
+      
+      if (options.dryRun) {
+        console.log(chalk.yellow('🔍 Running in dry-run mode...'));
+        const { generateSchemaDiff } = await import('./diff');
+        const diff = await generateSchemaDiff(config, true); // Enable debug logging
+        
+        console.log(chalk.blue('\n📊 Schema Analysis Results:'));
+        console.log('='.repeat(50));
+        
+        if (diff.hasChanges) {
+          console.log(chalk.yellow(`Found ${diff.tables.length} table(s) with changes:`));
+          
+          for (const tableDiff of diff.tables) {
+            console.log(chalk.cyan(`\n📄 Table: ${tableDiff.table}`));
+            console.log(chalk.gray(`   Action: ${tableDiff.action}`));
+            
+            if (tableDiff.action === 'create') {
+              const cols = Object.keys(tableDiff.definition || {});
+              console.log(chalk.green(`   → Will create table with ${cols.length} columns: ${cols.join(', ')}`));
+            } else if (tableDiff.action === 'alter' && tableDiff.columns) {
+              console.log(chalk.yellow(`   → Will modify ${tableDiff.columns.length} column(s):`));
+              for (const colDiff of tableDiff.columns) {
+                console.log(chalk.gray(`     - ${colDiff.column}: ${colDiff.action}`));
+              }
+            } else if (tableDiff.action === 'drop') {
+              console.log(chalk.red(`   → Will drop table`));
+            }
+          }
+          
+          console.log(chalk.yellow(`\n💡 To generate the migration file, run without --dry-run flag`));
+        } else {
+          console.log(chalk.green('✅ No schema changes detected!'));
+          console.log(chalk.gray('   Your database schema is in sync with your models.'));
+        }
+        
+        return;
+      }
       
       console.log(chalk.blue('🔍 Analyzing schema differences...'));
       

@@ -6,11 +6,19 @@ export class SchemaDiffer {
   private sequelize: Sequelize;
   private config: SchemaSyncConfig;
   private queryInterface: QueryInterface;
+  private debug: boolean;
 
-  constructor(config: SchemaSyncConfig) {
+  constructor(config: SchemaSyncConfig, debug = false) {
     this.sequelize = config.sequelize;
     this.config = config;
     this.queryInterface = this.sequelize.getQueryInterface();
+    this.debug = debug;
+  }
+
+  private log(...args: any[]) {
+    if (this.debug) {
+      console.log(...args);
+    }
   }
 
   async generateDiff(): Promise<SchemaDiff> {
@@ -18,9 +26,12 @@ export class SchemaDiffer {
     
     // Load models using the new loader
     const models = await loadModelsFromConfig(this.config);
+    this.log(`Loaded ${models.length} models:`, models.map(m => m.tableName));
     
     // Get current database schema
     const existingTables = await this.getExistingTables();
+    this.log(`Found ${existingTables.length} existing tables:`, existingTables);
+    
     const modelTableNames = models.map(model => model.tableName);
     
     // Check for new tables (models that don't exist in DB)
@@ -28,6 +39,7 @@ export class SchemaDiffer {
       const tableName = model.tableName;
       
       if (!existingTables.includes(tableName)) {
+        this.log(`Table ${tableName} does not exist, will create`);
         // Table doesn't exist, need to create it
         differences.push({
           table: tableName,
@@ -35,15 +47,19 @@ export class SchemaDiffer {
           definition: await this.getModelTableDefinition(model)
         });
       } else {
+        this.log(`Comparing table ${tableName} for changes...`);
         // Table exists, check for column differences
         const columnDiffs = await this.compareTableColumns(model);
         
         if (columnDiffs.length > 0) {
+          this.log(`Found ${columnDiffs.length} column differences for table ${tableName}`);
           differences.push({
             table: tableName,
             action: 'alter',
             columns: columnDiffs
           });
+        } else {
+          this.log(`No changes detected for table ${tableName}`);
         }
       }
     }
@@ -51,12 +67,15 @@ export class SchemaDiffer {
     // Check for tables to drop (tables that exist in DB but not in models)
     for (const existingTable of existingTables) {
       if (!modelTableNames.includes(existingTable)) {
+        this.log(`Table ${existingTable} exists in DB but not in models, will drop`);
         differences.push({
           table: existingTable,
           action: 'drop'
         });
       }
     }
+    
+    this.log(`Schema diff complete: ${differences.length} total differences found`);
     
     return {
       tables: differences,
@@ -100,12 +119,17 @@ export class SchemaDiffer {
       const existingColumns = await this.queryInterface.describeTable(tableName);
       const modelAttributes = model.rawAttributes;
       
+      this.log(`Comparing columns for table ${tableName}`);
+      this.log(`DB columns:`, Object.keys(existingColumns));
+      this.log(`Model columns:`, Object.keys(modelAttributes));
+      
       const existingColumnNames = Object.keys(existingColumns);
       const modelColumnNames = Object.keys(modelAttributes);
       
       // Check for new columns (in model but not in DB)
       for (const columnName of modelColumnNames) {
         if (!existingColumnNames.includes(columnName)) {
+          this.log(`Column ${columnName} is new (not in DB)`);
           differences.push({
             column: columnName,
             action: 'add',
@@ -116,7 +140,12 @@ export class SchemaDiffer {
           const existingColumn = existingColumns[columnName];
           const modelColumn = modelAttributes[columnName];
           
+          this.log(`Checking column ${columnName} for changes...`);
+          this.log(`DB column:`, JSON.stringify(existingColumn, null, 2));
+          this.log(`Model column:`, JSON.stringify(modelColumn, null, 2));
+          
           if (this.hasColumnChanged(existingColumn, modelColumn)) {
+            this.log(`Column ${columnName} has changed`);
             differences.push({
               column: columnName,
               action: 'change',
@@ -130,6 +159,7 @@ export class SchemaDiffer {
       // Check for columns to remove (in DB but not in model)
       for (const columnName of existingColumnNames) {
         if (!modelColumnNames.includes(columnName)) {
+          this.log(`Column ${columnName} should be removed (not in model)`);
           differences.push({
             column: columnName,
             action: 'remove',
@@ -180,11 +210,43 @@ export class SchemaDiffer {
     const modelType = this.normalizeDataType(modelColumn.type);
     
     if (existingType !== modelType) {
+      this.log(`Type difference for column: existing=${existingType}, model=${modelType}`);
       return true;
     }
     
     // Compare nullability
-    if (existingColumn.allowNull !== (modelColumn.allowNull !== false)) {
+    const existingAllowNull = existingColumn.allowNull;
+    const modelAllowNull = modelColumn.allowNull !== false;
+    
+    if (existingAllowNull !== modelAllowNull) {
+      this.log(`Nullability difference: existing=${existingAllowNull}, model=${modelAllowNull}`);
+      return true;
+    }
+    
+    // Compare primary key
+    const existingPK = !!existingColumn.primaryKey;
+    const modelPK = !!modelColumn.primaryKey;
+    
+    if (existingPK !== modelPK) {
+      this.log(`Primary key difference: existing=${existingPK}, model=${modelPK}`);
+      return true;
+    }
+    
+    // Compare auto increment
+    const existingAI = !!existingColumn.autoIncrement;
+    const modelAI = !!modelColumn.autoIncrement;
+    
+    if (existingAI !== modelAI) {
+      this.log(`Auto increment difference: existing=${existingAI}, model=${modelAI}`);
+      return true;
+    }
+    
+    // Compare unique constraint
+    const existingUnique = !!existingColumn.unique;
+    const modelUnique = !!modelColumn.unique;
+    
+    if (existingUnique !== modelUnique) {
+      this.log(`Unique constraint difference: existing=${existingUnique}, model=${modelUnique}`);
       return true;
     }
     
@@ -193,6 +255,7 @@ export class SchemaDiffer {
     const modelDefault = this.normalizeDefaultValue(modelColumn.defaultValue);
     
     if (existingDefault !== modelDefault) {
+      this.log(`Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
       return true;
     }
     
@@ -200,15 +263,48 @@ export class SchemaDiffer {
   }
 
   private normalizeDataType(type: any): string {
+    let typeStr = '';
+    
     if (typeof type === 'string') {
-      return type.toLowerCase();
+      typeStr = type.toLowerCase();
+    } else if (type && typeof type.toString === 'function') {
+      typeStr = type.toString().toLowerCase();
+    } else {
+      typeStr = String(type).toLowerCase();
     }
     
-    if (type && typeof type.toString === 'function') {
-      return type.toString().toLowerCase();
+    // Normalize common PostgreSQL/database types to standard forms
+    const typeMap: Record<string, string> = {
+      'character varying': 'varchar',
+      'character varying(255)': 'varchar(255)',
+      'integer': 'integer',
+      'bigint': 'bigint',
+      'double precision': 'double',
+      'real': 'float',
+      'boolean': 'boolean',
+      'timestamp without time zone': 'timestamp',
+      'timestamp with time zone': 'timestamptz',
+      'time without time zone': 'time',
+      'text': 'text',
+      'json': 'json',
+      'jsonb': 'jsonb',
+      'decimal': 'decimal',
+      'numeric': 'decimal',
+      'uuid': 'uuid'
+    };
+    
+    // Apply normalization
+    for (const [pgType, normalized] of Object.entries(typeMap)) {
+      if (typeStr.includes(pgType)) {
+        typeStr = normalized;
+        break;
+      }
     }
     
-    return String(type).toLowerCase();
+    // Remove precision/scale for comparison purposes
+    typeStr = typeStr.replace(/\(\d+(\,\d+)?\)/g, '');
+    
+    return typeStr;
   }
 
   private normalizeDefaultValue(value: any): any {
@@ -217,25 +313,56 @@ export class SchemaDiffer {
       return null;
     }
     
-    // Convert string numbers to numbers
+    // Handle DataTypes.NOW
+    if (value && value.toString && value.toString() === 'DataTypes.NOW') {
+      return 'now()';
+    }
+    
+    // Convert string values
     if (typeof value === 'string') {
-      // Check if it's a numeric string
+      const lowerValue = value.toLowerCase().trim();
+      
+      // PostgreSQL specific default value normalization
+      if (lowerValue === 'now()' || lowerValue === 'current_timestamp' || 
+          lowerValue.includes('now()') || lowerValue.includes('current_timestamp')) {
+        return 'now()';
+      }
+      
+      // Handle quoted strings - remove quotes for comparison
+      if ((value.startsWith("'") && value.endsWith("'")) ||
+          (value.startsWith('"') && value.endsWith('"'))) {
+        return value.slice(1, -1);
+      }
+      
+      // Handle boolean strings
+      if (lowerValue === 'true' || lowerValue === 't') return true;
+      if (lowerValue === 'false' || lowerValue === 'f') return false;
+      
+      // Handle numeric strings
       if (/^\d+$/.test(value)) {
         return parseInt(value, 10);
       }
-      // Check if it's "true" or "false"
-      if (value.toLowerCase() === 'true') return true;
-      if (value.toLowerCase() === 'false') return false;
-      // Check for boolean-like numbers
-      if (value === '1') return true;
-      if (value === '0') return false;
+      
+      if (/^\d+\.\d+$/.test(value)) {
+        return parseFloat(value);
+      }
+      
+      // Handle array/object defaults (PostgreSQL)
+      if (lowerValue === '[]' || lowerValue === '{}') {
+        return lowerValue === '[]' ? [] : null; // Convert {} to null for PostgreSQL compatibility
+      }
+    }
+    
+    // Handle boolean/numeric values
+    if (typeof value === 'boolean' || typeof value === 'number') {
+      return value;
     }
     
     return value;
   }
 }
 
-export async function generateSchemaDiff(config: SchemaSyncConfig): Promise<SchemaDiff> {
-  const differ = new SchemaDiffer(config);
+export async function generateSchemaDiff(config: SchemaSyncConfig, debug = false): Promise<SchemaDiff> {
+  const differ = new SchemaDiffer(config, debug);
   return await differ.generateDiff();
 }
