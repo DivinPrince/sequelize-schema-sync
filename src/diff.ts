@@ -341,17 +341,11 @@ export class SchemaDiffer {
       return true;
     }
 
-    // Unique constraint comparison (ignore for JSON/array columns)
-    const existingUnique = !!existingColumn.unique;
-    const modelUnique = !!modelColumn.unique;
-    const typeStr = this.dialectHandler.normalizeType(this.getTypeString(modelColumn.type));
-    const ignoreUniqueTypes = ['json', 'jsonb', 'json[]', 'varchar[]', 'text[]', 'array'];
-    if (!ignoreUniqueTypes.includes(typeStr)) {
-      if (existingUnique !== modelUnique) {
-        this.log(`Unique constraint difference: existing=${existingUnique}, model=${modelUnique}`);
-        return true;
-      }
-    }
+  // Unique constraint comparison: ignore for all columns
+  // (No-op: do not report unique constraint differences)
+
+  // Make typeStr available for default value comparison
+  const typeStr = this.dialectHandler.normalizeType(this.getTypeString(modelColumn.type));
 
     // Default value comparison - skip for auto-increment and primary key columns
     if (!existingAI && !modelAI && !existingPK) {
