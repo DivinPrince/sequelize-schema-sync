@@ -1,5 +1,6 @@
 import { join, resolve } from 'path';
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { uniqueNamesGenerator, adjectives, colors, animals } from 'unique-names-generator';
 import { SchemaSyncConfig, SchemaDiff, TableDifference, ColumnDifference, MigrationData } from './types';
 import { generateSchemaDiff } from './diff';
 
@@ -27,7 +28,12 @@ export class MigrationGenerator {
 
   private createMigrationData(diff: SchemaDiff, name?: string): MigrationData {
     const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14);
-    const migrationName = name || 'auto_generated_migration';
+    const migrationName = name || uniqueNamesGenerator({
+      dictionaries: [adjectives, colors, animals],
+      separator: '_',
+      length: 3,
+      style: 'lowerCase'
+    });
     const fileName = `${timestamp}_${migrationName}`;
 
     const upStatements: string[] = [];

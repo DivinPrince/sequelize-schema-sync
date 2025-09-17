@@ -4,6 +4,7 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import { resolve, join } from 'path';
 import { existsSync } from 'fs';
+import { uniqueNamesGenerator, adjectives, colors, animals } from 'unique-names-generator';
 import { SchemaSyncConfig } from './types';
 import { generateMigration } from './generator';
 import { runMigrations, rollbackMigration, getMigrationStatus } from './migrator';
@@ -64,7 +65,20 @@ program
       console.log(chalk.green('✅ Configuration loaded'));
       
       console.log(chalk.blue('🔍 Analyzing schema differences...'));
-      const migrationFile = await generateMigration(config, options.name);
+      
+      // Generate a random name if none provided
+      let migrationName = options.name;
+      if (!migrationName) {
+        migrationName = uniqueNamesGenerator({
+          dictionaries: [adjectives, colors, animals],
+          separator: '_',
+          length: 3,
+          style: 'lowerCase'
+        });
+        console.log(chalk.cyan(`🎲 Generated migration name: ${migrationName}`));
+      }
+      
+      const migrationFile = await generateMigration(config, migrationName);
       
       if (migrationFile) {
         console.log(chalk.green(`✅ Migration generated: ${migrationFile}`));
