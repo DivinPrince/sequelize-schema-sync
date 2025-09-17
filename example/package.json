@@ -1,0 +1,24 @@
+{
+  "name": "sequelize-schema-sync-example",
+  "version": "1.0.0",
+  "description": "Example usage of sequelize-schema-sync",
+  "main": "index.js",
+  "scripts": {
+    "dev": "ts-node index.ts",
+    "build": "tsc",
+    "migrate": "sequelize-schema-sync migrate",
+    "generate": "sequelize-schema-sync generate",
+    "rollback": "sequelize-schema-sync rollback",
+    "init-schema": "sequelize-schema-sync init"
+  },
+  "dependencies": {
+    "sequelize": "^6.33.0",
+    "sqlite3": "^5.1.6",
+    "sequelize-schema-sync": "file:../"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  }
+}
