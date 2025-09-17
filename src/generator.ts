@@ -188,7 +188,18 @@ export class MigrationGenerator {
         }
       } else if (Array.isArray(columnDef.defaultValue) || typeof columnDef.defaultValue === 'object') {
         // Handle arrays and objects for JSON fields (e.g., defaultValue: [])
-        defaultStr = JSON.stringify(columnDef.defaultValue);
+        if (columnDef.defaultValue === null) {
+          defaultStr = 'null';
+        } else {
+          const jsonStr = JSON.stringify(columnDef.defaultValue);
+          // For PostgreSQL, empty objects {} cause issues, so we'll use null instead
+          if (jsonStr === '{}' || jsonStr === '') {
+            defaultStr = 'null';
+          } else {
+            // Escape the JSON string properly for PostgreSQL
+            defaultStr = `'${jsonStr}'`;
+          }
+        }
       } else if (typeof columnDef.defaultValue === 'boolean' || typeof columnDef.defaultValue === 'number') {
         // Handle boolean and number values without quotes
         defaultStr = String(columnDef.defaultValue);
