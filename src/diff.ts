@@ -341,12 +341,16 @@ export class SchemaDiffer {
       return true;
     }
 
-    // Unique constraint comparison
+    // Unique constraint comparison (ignore for JSON/array columns)
     const existingUnique = !!existingColumn.unique;
     const modelUnique = !!modelColumn.unique;
-    if (existingUnique !== modelUnique) {
-      this.log(`Unique constraint difference: existing=${existingUnique}, model=${modelUnique}`);
-      return true;
+    const typeStr = this.dialectHandler.normalizeType(this.getTypeString(modelColumn.type));
+    const ignoreUniqueTypes = ['json', 'jsonb', 'json[]', 'varchar[]', 'text[]', 'array'];
+    if (!ignoreUniqueTypes.includes(typeStr)) {
+      if (existingUnique !== modelUnique) {
+        this.log(`Unique constraint difference: existing=${existingUnique}, model=${modelUnique}`);
+        return true;
+      }
     }
 
     // Default value comparison - skip for auto-increment and primary key columns
@@ -354,13 +358,17 @@ export class SchemaDiffer {
       let existingDefault = this.dialectHandler.normalizeDefaultValue(existingColumn.defaultValue);
       let modelDefault = this.dialectHandler.normalizeDefaultValue(modelColumn.defaultValue);
       // Treat null, undefined, empty object, and missing as equivalent
-  const isEmpty = (v: any) => v === null || v === undefined || (typeof v === 'object' && v && Object.keys(v).length === 0);
+      const isEmpty = (v: any) => v === null || v === undefined || (typeof v === 'object' && v && Object.keys(v).length === 0);
       if (isEmpty(existingDefault) && isEmpty(modelDefault)) {
         existingDefault = modelDefault = null;
       }
-      if (existingDefault !== modelDefault) {
-        this.log(`[POSTGRES] Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
-        return true;
+      // Ignore default value differences for JSON/array columns
+      const ignoreDefaultTypes = ['json', 'jsonb', 'json[]', 'varchar[]', 'text[]', 'array'];
+      if (!ignoreDefaultTypes.includes(typeStr)) {
+        if (existingDefault !== modelDefault) {
+          this.log(`[POSTGRES] Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
+          return true;
+        }
       }
     }
 
