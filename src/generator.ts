@@ -186,6 +186,12 @@ export class MigrationGenerator {
         } else {
           defaultStr = String(columnDef.defaultValue);
         }
+      } else if (Array.isArray(columnDef.defaultValue) || typeof columnDef.defaultValue === 'object') {
+        // Handle arrays and objects for JSON fields (e.g., defaultValue: [])
+        defaultStr = JSON.stringify(columnDef.defaultValue);
+      } else if (typeof columnDef.defaultValue === 'boolean' || typeof columnDef.defaultValue === 'number') {
+        // Handle boolean and number values without quotes
+        defaultStr = String(columnDef.defaultValue);
       } else {
         defaultStr = String(columnDef.defaultValue);
       }
