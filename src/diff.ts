@@ -2,22 +2,48 @@ import { Sequelize, ModelStatic, Model, QueryInterface, DataTypes } from 'sequel
 import { SchemaSyncConfig, SchemaDiff, TableDifference, ColumnDifference } from './types';
 import { loadModelsFromConfig } from './model-loader';
 
+interface DatabaseDialectHandler {
+  normalizeType(type: string): string;
+  isAutoIncrement(column: any): boolean;
+  normalizeDefaultValue(value: any): any;
+  filterSystemTables(tables: string[]): string[];
+  compareBooleans(existing: any, model: any): boolean;
+}
+
 export class SchemaDiffer {
   private sequelize: Sequelize;
   private config: SchemaSyncConfig;
   private queryInterface: QueryInterface;
   private debug: boolean;
+  private dialect: string;
+  private dialectHandler: DatabaseDialectHandler;
 
   constructor(config: SchemaSyncConfig, debug = false) {
     this.sequelize = config.sequelize;
     this.config = config;
     this.queryInterface = this.sequelize.getQueryInterface();
     this.debug = debug;
+    this.dialect = this.sequelize.getDialect();
+    this.dialectHandler = this.createDialectHandler();
+  }
+
+  private createDialectHandler(): DatabaseDialectHandler {
+    switch (this.dialect) {
+      case 'postgres':
+        return new PostgreSQLHandler();
+      case 'mysql':
+      case 'mariadb':
+        return new MySQLHandler();
+      case 'sqlite':
+        return new SQLiteHandler();
+      default:
+        return new GenericHandler();
+    }
   }
 
   private log(...args: any[]) {
     if (this.debug) {
-      console.log(...args);
+      console.log(`[${this.dialect.toUpperCase()}]`, ...args);
     }
   }
 
@@ -40,7 +66,6 @@ export class SchemaDiffer {
       
       if (!existingTables.includes(tableName)) {
         this.log(`Table ${tableName} does not exist, will create`);
-        // Table doesn't exist, need to create it
         differences.push({
           table: tableName,
           action: 'create',
@@ -48,7 +73,6 @@ export class SchemaDiffer {
         });
       } else {
         this.log(`Comparing table ${tableName} for changes...`);
-        // Table exists, check for column differences
         const columnDiffs = await this.compareTableColumns(model);
         
         if (columnDiffs.length > 0) {
@@ -86,13 +110,7 @@ export class SchemaDiffer {
   private async getExistingTables(): Promise<string[]> {
     try {
       const tables = await this.queryInterface.showAllTables();
-      // Filter out system/migration tables that should be ignored
-      return tables.filter(table => {
-        const tableName = table.toLowerCase();
-        return !tableName.includes('sequelizemeta') && 
-               !tableName.includes('sqlite_sequence') &&
-               !tableName.startsWith('sqlite_');
-      });
+      return this.dialectHandler.filterSystemTables(tables.map(t => String(t)));
     } catch (error) {
       console.warn('Could not retrieve existing tables:', error);
       return [];
@@ -115,7 +133,6 @@ export class SchemaDiffer {
     const differences: ColumnDifference[] = [];
     
     try {
-      // Get existing columns from database
       const existingColumns = await this.queryInterface.describeTable(tableName);
       const modelAttributes = model.rawAttributes;
       
@@ -126,7 +143,7 @@ export class SchemaDiffer {
       const existingColumnNames = Object.keys(existingColumns);
       const modelColumnNames = Object.keys(modelAttributes);
       
-      // Check for new columns (in model but not in DB)
+      // Check for new columns
       for (const columnName of modelColumnNames) {
         if (!existingColumnNames.includes(columnName)) {
           this.log(`Column ${columnName} is new (not in DB)`);
@@ -136,13 +153,10 @@ export class SchemaDiffer {
             to: this.convertAttributeToQueryInterface(modelAttributes[columnName])
           });
         } else {
-          // Column exists, check for changes
           const existingColumn = existingColumns[columnName];
           const modelColumn = modelAttributes[columnName];
           
           this.log(`Checking column ${columnName} for changes...`);
-          this.log(`DB column:`, JSON.stringify(existingColumn, null, 2));
-          this.log(`Model column:`, JSON.stringify(modelColumn, null, 2));
           
           if (this.hasColumnChanged(existingColumn, modelColumn)) {
             this.log(`Column ${columnName} has changed`);
@@ -156,7 +170,7 @@ export class SchemaDiffer {
         }
       }
       
-      // Check for columns to remove (in DB but not in model)
+      // Check for columns to remove
       for (const columnName of existingColumnNames) {
         if (!modelColumnNames.includes(columnName)) {
           this.log(`Column ${columnName} should be removed (not in model)`);
@@ -181,69 +195,35 @@ export class SchemaDiffer {
       allowNull: attribute.allowNull !== false
     };
     
-    if (attribute.primaryKey) {
-      converted.primaryKey = true;
-    }
-    
-    if (attribute.autoIncrement) {
-      converted.autoIncrement = true;
-    }
-    
-    if (attribute.defaultValue !== undefined) {
-      converted.defaultValue = attribute.defaultValue;
-    }
-    
-    if (attribute.unique) {
-      converted.unique = true;
-    }
-    
-    if (attribute.references) {
-      converted.references = attribute.references;
-    }
+    if (attribute.primaryKey) converted.primaryKey = true;
+    if (attribute.autoIncrement) converted.autoIncrement = true;
+    if (attribute.defaultValue !== undefined) converted.defaultValue = attribute.defaultValue;
+    if (attribute.unique) converted.unique = true;
+    if (attribute.references) converted.references = attribute.references;
     
     return converted;
   }
 
   private hasColumnChanged(existingColumn: any, modelColumn: any): boolean {
-    // Normalize type for enums: treat varchar and enum as equivalent if values match
-    let existingType = this.normalizeDataType(existingColumn.type);
-    let modelType = this.normalizeDataType(modelColumn.type);
-
-    // If model is ENUM and DB is VARCHAR, treat as equal if values match
-    if (modelType === 'enum' && (existingType === 'varchar' || existingType === 'varchar(255)')) {
-      if (modelColumn.values && Array.isArray(modelColumn.values)) {
-        // Optionally, check DB for enum values if available
-        // If not, treat as equivalent
-        existingType = 'enum';
-      }
-    }
-
-    // Normalize timestamp types
-    if ((existingType === 'time' || existingType === 'timestamp' || existingType === 'timestamptz') &&
-        (modelType === 'date' || modelType === 'timestamptz')) {
-      existingType = modelType = 'date';
-    }
-
+    // Type comparison
+    const existingType = this.dialectHandler.normalizeType(this.getTypeString(existingColumn.type));
+    const modelType = this.dialectHandler.normalizeType(this.getTypeString(modelColumn.type));
+    
     if (existingType !== modelType) {
-      this.log(`Type difference for column: existing=${existingType}, model=${modelType}`);
+      this.log(`Type difference: existing=${existingType}, model=${modelType}`);
       return true;
     }
 
-    // Nullability: treat PK and autoIncrement as always NOT NULL
-    let existingAllowNull = existingColumn.allowNull;
-    let modelAllowNull = modelColumn.allowNull !== false;
-    if (modelColumn.primaryKey || modelColumn.autoIncrement) {
-      modelAllowNull = false;
-    }
-    if (existingColumn.primaryKey || existingColumn.autoIncrement) {
-      existingAllowNull = false;
-    }
+    // Nullability comparison
+    const existingAllowNull = this.getNullability(existingColumn);
+    const modelAllowNull = this.getNullability(modelColumn);
+    
     if (existingAllowNull !== modelAllowNull) {
       this.log(`Nullability difference: existing=${existingAllowNull}, model=${modelAllowNull}`);
       return true;
     }
 
-    // Primary key
+    // Primary key comparison
     const existingPK = !!existingColumn.primaryKey;
     const modelPK = !!modelColumn.primaryKey;
     if (existingPK !== modelPK) {
@@ -251,18 +231,15 @@ export class SchemaDiffer {
       return true;
     }
 
-    // Auto increment: treat DB nextval as equivalent to model autoIncrement
-    let existingAI = !!existingColumn.autoIncrement;
-    let modelAI = !!modelColumn.autoIncrement;
-    if (!existingAI && typeof existingColumn.defaultValue === 'string' && existingColumn.defaultValue.includes('nextval')) {
-      existingAI = true;
-    }
+    // Auto increment comparison
+    const existingAI = this.dialectHandler.isAutoIncrement(existingColumn);
+    const modelAI = !!modelColumn.autoIncrement;
     if (existingAI !== modelAI) {
       this.log(`Auto increment difference: existing=${existingAI}, model=${modelAI}`);
       return true;
     }
 
-    // Unique constraint
+    // Unique constraint comparison
     const existingUnique = !!existingColumn.unique;
     const modelUnique = !!modelColumn.unique;
     if (existingUnique !== modelUnique) {
@@ -270,13 +247,12 @@ export class SchemaDiffer {
       return true;
     }
 
-    // Default values: treat DB nextval and model autoIncrement as equivalent
-    let existingDefault = this.normalizeDefaultValue(existingColumn.defaultValue);
-    let modelDefault = this.normalizeDefaultValue(modelColumn.defaultValue);
-    if (modelAI && typeof existingColumn.defaultValue === 'string' && existingColumn.defaultValue.includes('nextval')) {
-      existingDefault = modelDefault;
-    }
-    if (existingDefault !== modelDefault) {
+    // Default value comparison
+    const existingDefault = this.dialectHandler.normalizeDefaultValue(existingColumn.defaultValue);
+    const modelDefault = this.dialectHandler.normalizeDefaultValue(modelColumn.defaultValue);
+    
+    // Skip default comparison for auto-increment columns
+    if (!existingAI && !modelAI && existingDefault !== modelDefault) {
       this.log(`Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
       return true;
     }
@@ -284,103 +260,294 @@ export class SchemaDiffer {
     return false;
   }
 
-  private normalizeDataType(type: any): string {
-    let typeStr = '';
+  private getTypeString(type: any): string {
+    if (typeof type === 'string') return type;
+    if (type && typeof type.toString === 'function') return type.toString();
+    return String(type);
+  }
+
+  private getNullability(column: any): boolean {
+    // Primary keys and auto-increment columns are never nullable
+    if (column.primaryKey || column.autoIncrement) return false;
+    return column.allowNull !== false;
+  }
+}
+
+// Database-specific handlers
+class PostgreSQLHandler implements DatabaseDialectHandler {
+  normalizeType(type: string): string {
+    const typeStr = type.toLowerCase().trim();
     
-    if (typeof type === 'string') {
-      typeStr = type.toLowerCase();
-    } else if (type && typeof type.toString === 'function') {
-      typeStr = type.toString().toLowerCase();
-    } else {
-      typeStr = String(type).toLowerCase();
-    }
-    
-    // Normalize common PostgreSQL/database types to standard forms
     const typeMap: Record<string, string> = {
       'character varying': 'varchar',
-      'character varying(255)': 'varchar(255)',
-      'integer': 'integer',
-      'bigint': 'bigint',
+      'character varying(255)': 'varchar',
       'double precision': 'double',
-      'real': 'float',
-      'boolean': 'boolean',
       'timestamp without time zone': 'timestamp',
       'timestamp with time zone': 'timestamptz',
       'time without time zone': 'time',
+      'integer': 'integer',
+      'bigint': 'bigint',
+      'smallint': 'smallint',
+      'real': 'float',
+      'numeric': 'decimal',
+      'boolean': 'boolean',
       'text': 'text',
       'json': 'json',
       'jsonb': 'jsonb',
-      'decimal': 'decimal',
-      'numeric': 'decimal',
       'uuid': 'uuid'
     };
-    
-    // Apply normalization
+
     for (const [pgType, normalized] of Object.entries(typeMap)) {
-      if (typeStr.includes(pgType)) {
-        typeStr = normalized;
-        break;
-      }
+      if (typeStr.includes(pgType)) return normalized;
     }
-    
-    // Remove precision/scale for comparison purposes
-    typeStr = typeStr.replace(/\(\d+(\,\d+)?\)/g, '');
-    
-    return typeStr;
+
+    return typeStr.replace(/\(\d+(\,\s*\d+)?\)/g, '');
   }
 
-  private normalizeDefaultValue(value: any): any {
-    // Handle undefined/null
-    if (value === undefined || value === null) {
-      return null;
-    }
+  isAutoIncrement(column: any): boolean {
+    return !!(column.autoIncrement || 
+             (column.defaultValue && 
+              typeof column.defaultValue === 'string' && 
+              column.defaultValue.includes('nextval')));
+  }
+
+  normalizeDefaultValue(value: any): any {
+    if (value === undefined || value === null) return null;
     
-    // Handle DataTypes.NOW
-    if (value && value.toString && value.toString() === 'DataTypes.NOW') {
-      return 'now()';
-    }
-    
-    // Convert string values
     if (typeof value === 'string') {
       const lowerValue = value.toLowerCase().trim();
       
-      // PostgreSQL specific default value normalization
       if (lowerValue === 'now()' || lowerValue === 'current_timestamp' || 
-          lowerValue.includes('now()') || lowerValue.includes('current_timestamp')) {
-        return 'now()';
+          lowerValue.includes('now()')) {
+        return 'CURRENT_TIMESTAMP';
       }
       
-      // Handle quoted strings - remove quotes for comparison
+      if (lowerValue === 'true' || lowerValue === 't') return true;
+      if (lowerValue === 'false' || lowerValue === 'f') return false;
+      
+      // Remove quotes
+      if ((value.startsWith("'") && value.endsWith("'")) ||
+          (value.startsWith('"') && value.endsWith('"'))) {
+        return value.slice(1, -1);
+      }
+    }
+    
+    return value;
+  }
+
+  filterSystemTables(tables: string[]): string[] {
+    return tables.filter(table => {
+      const lowerTable = table.toLowerCase();
+      return !lowerTable.startsWith('pg_') &&
+             lowerTable !== 'information_schema' &&
+             !lowerTable.includes('sequelizemeta');
+    });
+  }
+
+  compareBooleans(existing: any, model: any): boolean {
+    return existing === model;
+  }
+}
+
+class MySQLHandler implements DatabaseDialectHandler {
+  normalizeType(type: string): string {
+    const typeStr = type.toLowerCase().trim();
+    
+    const typeMap: Record<string, string> = {
+      'tinyint(1)': 'boolean',
+      'tinyint': 'tinyint',
+      'smallint': 'smallint',
+      'mediumint': 'mediumint',
+      'int': 'integer',
+      'integer': 'integer',
+      'bigint': 'bigint',
+      'decimal': 'decimal',
+      'numeric': 'decimal',
+      'float': 'float',
+      'double': 'double',
+      'real': 'double',
+      'bit': 'bit',
+      'boolean': 'boolean',
+      'serial': 'bigint',
+      'char': 'char',
+      'varchar': 'varchar',
+      'binary': 'binary',
+      'varbinary': 'varbinary',
+      'tinyblob': 'blob',
+      'tinytext': 'text',
+      'text': 'text',
+      'blob': 'blob',
+      'mediumtext': 'mediumtext',
+      'mediumblob': 'mediumblob',
+      'longtext': 'longtext',
+      'longblob': 'longblob',
+      'enum': 'enum',
+      'set': 'set',
+      'date': 'date',
+      'datetime': 'datetime',
+      'timestamp': 'timestamp',
+      'time': 'time',
+      'year': 'year',
+      'json': 'json'
+    };
+
+    for (const [mysqlType, normalized] of Object.entries(typeMap)) {
+      if (typeStr.includes(mysqlType)) return normalized;
+    }
+
+    return typeStr.replace(/\(\d+(\,\s*\d+)?\)/g, '');
+  }
+
+  isAutoIncrement(column: any): boolean {
+    return !!(column.autoIncrement || 
+             (column.extra && column.extra.toLowerCase().includes('auto_increment')));
+  }
+
+  normalizeDefaultValue(value: any): any {
+    if (value === undefined || value === null) return null;
+    
+    if (typeof value === 'string') {
+      const lowerValue = value.toLowerCase().trim();
+      
+      if (lowerValue === 'current_timestamp' || lowerValue === 'current_timestamp()' || 
+          lowerValue === 'now()') {
+        return 'CURRENT_TIMESTAMP';
+      }
+      
+      if (lowerValue === '1') return true;
+      if (lowerValue === '0') return false;
+      
+      // Remove quotes
       if ((value.startsWith("'") && value.endsWith("'")) ||
           (value.startsWith('"') && value.endsWith('"'))) {
         return value.slice(1, -1);
       }
       
-      // Handle boolean strings
-      if (lowerValue === 'true' || lowerValue === 't') return true;
-      if (lowerValue === 'false' || lowerValue === 'f') return false;
-      
-      // Handle numeric strings
-      if (/^\d+$/.test(value)) {
-        return parseInt(value, 10);
-      }
-      
-      if (/^\d+\.\d+$/.test(value)) {
-        return parseFloat(value);
-      }
-      
-      // Handle array/object defaults (PostgreSQL)
-      if (lowerValue === '[]' || lowerValue === '{}') {
-        return lowerValue === '[]' ? [] : null; // Convert {} to null for PostgreSQL compatibility
-      }
-    }
-    
-    // Handle boolean/numeric values
-    if (typeof value === 'boolean' || typeof value === 'number') {
-      return value;
+      // Parse numbers
+      if (/^\d+$/.test(value)) return parseInt(value, 10);
+      if (/^\d+\.\d+$/.test(value)) return parseFloat(value);
     }
     
     return value;
+  }
+
+  filterSystemTables(tables: string[]): string[] {
+    return tables.filter(table => {
+      const lowerTable = table.toLowerCase();
+      return lowerTable !== 'information_schema' &&
+             lowerTable !== 'performance_schema' &&
+             lowerTable !== 'mysql' &&
+             lowerTable !== 'sys' &&
+             !lowerTable.includes('sequelizemeta');
+    });
+  }
+
+  compareBooleans(existing: any, model: any): boolean {
+    const existingBool = existing === 1 || existing === '1' || existing === true;
+    const modelBool = model === 1 || model === '1' || model === true;
+    return existingBool === modelBool;
+  }
+}
+
+class SQLiteHandler implements DatabaseDialectHandler {
+  normalizeType(type: string): string {
+    const typeStr = type.toLowerCase().trim();
+    
+    const typeMap: Record<string, string> = {
+      'integer': 'integer',
+      'real': 'real',
+      'text': 'text',
+      'blob': 'blob',
+      'numeric': 'numeric',
+      'boolean': 'boolean',
+      'datetime': 'datetime',
+      'date': 'date',
+      'time': 'time',
+      'varchar': 'varchar',
+      'char': 'char',
+      'decimal': 'decimal',
+      'float': 'real',
+      'double': 'real'
+    };
+
+    for (const [sqliteType, normalized] of Object.entries(typeMap)) {
+      if (typeStr.includes(sqliteType)) return normalized;
+    }
+
+    return typeStr.replace(/\(\d+(\,\s*\d+)?\)/g, '');
+  }
+
+  isAutoIncrement(column: any): boolean {
+    // In SQLite, only INTEGER PRIMARY KEY is auto-increment
+    return !!(column.autoIncrement || 
+             (column.primaryKey && this.normalizeType(String(column.type)) === 'integer'));
+  }
+
+  normalizeDefaultValue(value: any): any {
+    if (value === undefined || value === null) return null;
+    
+    if (typeof value === 'string') {
+      const lowerValue = value.toLowerCase().trim();
+      
+      if (lowerValue === 'current_timestamp' || lowerValue === "datetime('now')") {
+        return 'CURRENT_TIMESTAMP';
+      }
+      
+      if (lowerValue === '1') return 1;
+      if (lowerValue === '0') return 0;
+      
+      // Remove quotes
+      if ((value.startsWith("'") && value.endsWith("'")) ||
+          (value.startsWith('"') && value.endsWith('"'))) {
+        return value.slice(1, -1);
+      }
+      
+      // Parse numbers
+      if (/^\d+$/.test(value)) return parseInt(value, 10);
+      if (/^\d+\.\d+$/.test(value)) return parseFloat(value);
+    }
+    
+    return value;
+  }
+
+  filterSystemTables(tables: string[]): string[] {
+    return tables.filter(table => {
+      const lowerTable = table.toLowerCase();
+      return !lowerTable.startsWith('sqlite_') &&
+             lowerTable !== 'sqlite_sequence' &&
+             !lowerTable.includes('sequelizemeta');
+    });
+  }
+
+  compareBooleans(existing: any, model: any): boolean {
+    // SQLite stores booleans as integers
+    const existingBool = existing === 1 || existing === '1';
+    const modelBool = model === 1 || model === '1' || model === true;
+    return existingBool === modelBool;
+  }
+}
+
+class GenericHandler implements DatabaseDialectHandler {
+  normalizeType(type: string): string {
+    return type.toLowerCase().replace(/\(\d+(\,\s*\d+)?\)/g, '');
+  }
+
+  isAutoIncrement(column: any): boolean {
+    return !!column.autoIncrement;
+  }
+
+  normalizeDefaultValue(value: any): any {
+    return value;
+  }
+
+  filterSystemTables(tables: string[]): string[] {
+    return tables.filter(table => 
+      !table.toLowerCase().includes('sequelizemeta')
+    );
+  }
+
+  compareBooleans(existing: any, model: any): boolean {
+    return existing === model;
   }
 }
 
