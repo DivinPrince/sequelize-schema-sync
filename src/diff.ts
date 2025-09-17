@@ -205,11 +205,12 @@ export class SchemaDiffer {
   }
 
   private hasColumnChanged(existingColumn: any, modelColumn: any): boolean {
-    // Type comparison
+    // Enhanced type comparison with special handling for common mismatches
     const existingType = this.dialectHandler.normalizeType(this.getTypeString(existingColumn.type));
     const modelType = this.dialectHandler.normalizeType(this.getTypeString(modelColumn.type));
     
-    if (existingType !== modelType) {
+    // Special handling for common PostgreSQL vs Sequelize type mismatches
+    if (!this.areTypesEquivalent(existingType, modelType, existingColumn, modelColumn)) {
       this.log(`Type difference: existing=${existingType}, model=${modelType}`);
       return true;
     }
@@ -247,22 +248,83 @@ export class SchemaDiffer {
       return true;
     }
 
-    // Default value comparison
-    const existingDefault = this.dialectHandler.normalizeDefaultValue(existingColumn.defaultValue);
-    const modelDefault = this.dialectHandler.normalizeDefaultValue(modelColumn.defaultValue);
-    
-    // Skip default comparison for auto-increment columns
-    if (!existingAI && !modelAI && existingDefault !== modelDefault) {
-      this.log(`Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
-      return true;
+    // Default value comparison - skip for auto-increment and primary key columns
+    if (!existingAI && !modelAI && !existingPK) {
+      const existingDefault = this.dialectHandler.normalizeDefaultValue(existingColumn.defaultValue);
+      const modelDefault = this.dialectHandler.normalizeDefaultValue(modelColumn.defaultValue);
+      
+      if (existingDefault !== modelDefault) {
+        this.log(`Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
+        return true;
+      }
     }
 
     return false;
   }
 
+  private areTypesEquivalent(existingType: string, modelType: string, existingColumn: any, modelColumn: any): boolean {
+    // Direct match
+    if (existingType === modelType) return true;
+    
+    // Handle double vs float equivalence
+    if ((existingType === 'double' && modelType === 'float') || 
+        (existingType === 'float' && modelType === 'double')) {
+      return true;
+    }
+    
+    // Handle PostgreSQL time vs timestamptz equivalence
+    if ((existingType === 'time' && modelType === 'timestamptz') ||
+        (existingType === 'timestamptz' && modelType === 'timestamptz')) {
+      return true;
+    }
+    
+    // Handle enum vs varchar equivalence for PostgreSQL
+    if ((existingType === 'enum_or_varchar' && modelType === 'enum_or_varchar') ||
+        (existingType === 'varchar' && modelType === 'enum') ||
+        (existingType === 'enum' && modelType === 'varchar')) {
+      return true;
+    }
+    
+    // Handle array type equivalence (e.g., varchar vs varchar[])
+    if (existingType.includes('[]') !== modelType.includes('[]')) {
+      // One is array, one is not - check if this is intentional
+      const baseExisting = existingType.replace('[]', '');
+      const baseModel = modelType.replace('[]', '');
+      
+      // If base types match but array status differs, it's a real change
+      if (baseExisting === baseModel) {
+        return false; // This is a legitimate change
+      }
+    }
+    
+    return false;
+  }
+
   private getTypeString(type: any): string {
     if (typeof type === 'string') return type;
-    if (type && typeof type.toString === 'function') return type.toString();
+    if (type && typeof type.toString === 'function') {
+      const typeStr = type.toString();
+      // Handle Sequelize DataTypes.ARRAY(DataTypes.STRING) format
+      if (typeStr.includes('ARRAY') && typeStr.includes('STRING')) {
+        return 'varchar[]';
+      }
+      if (typeStr.includes('ARRAY') && typeStr.includes('TEXT')) {
+        return 'text[]';
+      }
+      if (typeStr.includes('ENUM')) {
+        return 'enum';
+      }
+      if (typeStr.includes('FLOAT') || typeStr.includes('REAL')) {
+        return 'float';
+      }
+      if (typeStr.includes('DOUBLE')) {
+        return 'double';
+      }
+      if (typeStr.includes('DATE') || typeStr.includes('TIMESTAMP')) {
+        return 'timestamptz';
+      }
+      return typeStr;
+    }
     return String(type);
   }
 
@@ -282,23 +344,33 @@ class PostgreSQLHandler implements DatabaseDialectHandler {
       'character varying': 'varchar',
       'character varying(255)': 'varchar',
       'double precision': 'double',
-      'timestamp without time zone': 'timestamp',
+      'timestamp without time zone': 'timestamptz',
       'timestamp with time zone': 'timestamptz',
-      'time without time zone': 'time',
+      'time without time zone': 'timestamptz',
+      'time': 'timestamptz', // Fix: PostgreSQL 'time' should match Sequelize TIMESTAMPTZ
       'integer': 'integer',
       'bigint': 'bigint',
       'smallint': 'smallint',
       'real': 'float',
+      'float': 'float', // Add explicit float mapping
+      'double': 'double',
       'numeric': 'decimal',
       'boolean': 'boolean',
       'text': 'text',
       'json': 'json',
       'jsonb': 'jsonb',
-      'uuid': 'uuid'
+      'uuid': 'uuid',
+      'varchar[]': 'varchar[]', // Handle array types
+      'text[]': 'text[]'
     };
 
     for (const [pgType, normalized] of Object.entries(typeMap)) {
       if (typeStr.includes(pgType)) return normalized;
+    }
+
+    // Handle ENUM vs VARCHAR comparison - treat as equivalent
+    if (typeStr.includes('enum') || typeStr.includes('varchar')) {
+      return 'enum_or_varchar'; // Unified type for comparison
     }
 
     return typeStr.replace(/\(\d+(\,\s*\d+)?\)/g, '');
@@ -325,12 +397,23 @@ class PostgreSQLHandler implements DatabaseDialectHandler {
       if (lowerValue === 'true' || lowerValue === 't') return true;
       if (lowerValue === 'false' || lowerValue === 'f') return false;
       
-      // Remove quotes
+      // Handle quoted numeric strings - normalize "0" to 0
       if ((value.startsWith("'") && value.endsWith("'")) ||
           (value.startsWith('"') && value.endsWith('"'))) {
-        return value.slice(1, -1);
+        const unquoted = value.slice(1, -1);
+        // Convert numeric strings to numbers for comparison
+        if (/^\d+$/.test(unquoted)) return parseInt(unquoted, 10);
+        if (/^\d+\.\d+$/.test(unquoted)) return parseFloat(unquoted);
+        return unquoted;
       }
+      
+      // Parse numeric strings
+      if (/^\d+$/.test(value)) return parseInt(value, 10);
+      if (/^\d+\.\d+$/.test(value)) return parseFloat(value);
     }
+    
+    // Handle numeric values
+    if (typeof value === 'number') return value;
     
     return value;
   }
