@@ -3,6 +3,7 @@ import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { uniqueNamesGenerator, adjectives, colors, animals } from 'unique-names-generator';
 import { SchemaSyncConfig, SchemaDiff, TableDifference, ColumnDifference, MigrationData } from './types';
 import { generateSchemaDiff } from './diff';
+import { MigrationRunner } from './migrator';
 
 export class MigrationGenerator {
   private config: SchemaSyncConfig;
@@ -13,7 +14,39 @@ export class MigrationGenerator {
     this.migrationsPath = resolve(config.migrationsPath || './migrations');
   }
 
+  /**
+   * Check if underscored option is enabled in Sequelize define options
+   */
+  private isUnderscored(): boolean {
+    const sequelize = this.config.sequelize as any;
+    
+    // Check the most common locations where Sequelize stores define options
+    return sequelize.options?.define?.underscored === true ||
+           sequelize.config?.define?.underscored === true;
+  }
+
+  /**
+   * Convert camelCase to snake_case when underscored is enabled
+   */
+  private formatColumnName(columnName: string): string {
+    if (!this.isUnderscored()) {
+      return columnName;
+    }
+    
+    // Convert camelCase to snake_case
+    return columnName.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+  }
+
   async generate(name?: string): Promise<string | null> {
+    // Check if there are pending migrations first
+    const hasPendingMigrations = await this.hasPendingMigrations();
+    
+    if (hasPendingMigrations) {
+      console.log('⚠️  Found pending migrations. Please run migrations first before generating new ones.');
+      console.log('   Run: npx sequelize-schema-sync migrate');
+      return null;
+    }
+    
     const diff = await generateSchemaDiff(this.config);
     
     if (!diff.hasChanges) {
@@ -24,6 +57,20 @@ export class MigrationGenerator {
     const migrationFile = this.writeMigrationFile(migrationData);
     
     return migrationFile;
+  }
+
+  /**
+   * Check if there are pending migrations that should be applied first
+   */
+  private async hasPendingMigrations(): Promise<boolean> {
+    try {
+      const runner = new MigrationRunner(this.config);
+      const pendingMigrations = await runner.getPendingMigrations();
+      return pendingMigrations.length > 0;
+    } catch (error) {
+      // If we can't check migrations (e.g., no migrations table yet), assume no pending migrations
+      return false;
+    }
   }
 
   private createMigrationData(diff: SchemaDiff, name?: string): MigrationData {
@@ -85,7 +132,8 @@ export class MigrationGenerator {
     const columns: string[] = [];
     
     for (const [columnName, columnDef] of Object.entries(definition)) {
-      columns.push(`    ${columnName}: ${this.formatColumnDefinition(columnDef)}`);
+      const formattedColumnName = this.formatColumnName(columnName);
+      columns.push(`    ${formattedColumnName}: ${this.formatColumnDefinition(columnDef)}`);
     }
     
     return `  await queryInterface.createTable('${tableName}', {\n${columns.join(',\n')}\n  });`;
@@ -114,23 +162,25 @@ export class MigrationGenerator {
   }
 
   private generateColumnMigration(tableName: string, column: ColumnDifference): { up: string; down: string } {
+    const formattedColumnName = this.formatColumnName(column.column);
+    
     switch (column.action) {
       case 'add':
         return {
-          up: `  await queryInterface.addColumn('${tableName}', '${column.column}', ${this.formatColumnDefinition(column.to)});`,
-          down: `  await queryInterface.removeColumn('${tableName}', '${column.column}');`
+          up: `  await queryInterface.addColumn('${tableName}', '${formattedColumnName}', ${this.formatColumnDefinition(column.to)});`,
+          down: `  await queryInterface.removeColumn('${tableName}', '${formattedColumnName}');`
         };
       
       case 'remove':
         return {
-          up: `  await queryInterface.removeColumn('${tableName}', '${column.column}');`,
-          down: `  await queryInterface.addColumn('${tableName}', '${column.column}', ${this.formatColumnDefinition(column.from)});`
+          up: `  await queryInterface.removeColumn('${tableName}', '${formattedColumnName}');`,
+          down: `  await queryInterface.addColumn('${tableName}', '${formattedColumnName}', ${this.formatColumnDefinition(column.from)});`
         };
       
       case 'change':
         return {
-          up: `  await queryInterface.changeColumn('${tableName}', '${column.column}', ${this.formatColumnDefinition(column.to)});`,
-          down: `  await queryInterface.changeColumn('${tableName}', '${column.column}', ${this.formatColumnDefinition(column.from)});`
+          up: `  await queryInterface.changeColumn('${tableName}', '${formattedColumnName}', ${this.formatColumnDefinition(column.to)});`,
+          down: `  await queryInterface.changeColumn('${tableName}', '${formattedColumnName}', ${this.formatColumnDefinition(column.from)});`
         };
       
       default:

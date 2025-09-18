@@ -221,6 +221,25 @@ const sequelize = new Sequelize({
   dialect: 'sqlite',
   storage: './database.sqlite',
   // Configure your database connection
+  
+  // Global define options for all models
+  define: {
+    // For MySQL, also set charset and collate in dialectOptions
+    charset: 'utf8mb4',
+    collate: 'utf8mb4_general_ci',
+    // Use snake_case for all auto-generated fields (timestamps, foreign keys, etc.)
+    underscored: true,
+    // Prevent Sequelize from pluralizing table names
+    freezeTableName: true,
+    // Add timestamps by default
+    timestamps: true,
+  },
+  
+  // For MySQL/MariaDB databases, uncomment and configure:
+  // dialectOptions: {
+  //   charset: 'utf8mb4',
+  //   collate: 'utf8mb4_general_ci',
+  // },
 });
 
 const config: SchemaSyncConfig = {

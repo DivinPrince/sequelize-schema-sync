@@ -238,7 +238,91 @@ const config: SchemaSyncConfig = {
 };
 ```
 
-## � Examples
+## ⚙️ Sequelize Define Options
+
+Configure global options for all your models using Sequelize's `define` option:
+
+### Basic Configuration
+
+```typescript
+const sequelize = new Sequelize({
+  dialect: 'sqlite',
+  storage: './database.sqlite',
+  
+  // Global define options for all models
+  define: {
+    charset: 'utf8mb4',
+    collate: 'utf8mb4_general_ci',
+    // Use snake_case for all auto-generated fields (timestamps, foreign keys, etc.)
+    underscored: true,
+    // Prevent table name pluralization
+    freezeTableName: true,
+    timestamps: true,
+  },
+});
+```
+
+### MySQL/MariaDB Configuration
+
+For MySQL and MariaDB, set charset and collation in both `define` and `dialectOptions`:
+
+```typescript
+const sequelize = new Sequelize({
+  dialect: 'mysql',
+  host: 'localhost',
+  database: 'myapp',
+  username: 'user',
+  password: 'password',
+  
+  // MySQL-specific options
+  dialectOptions: {
+    charset: 'utf8mb4',
+    collate: 'utf8mb4_general_ci',
+  },
+  
+  // Global define options
+  define: {
+    charset: 'utf8mb4',
+    collate: 'utf8mb4_general_ci',
+    // Use snake_case for all auto-generated fields (timestamps, foreign keys, etc.)
+    underscored: true,
+    freezeTableName: true,
+    timestamps: true,
+  },
+});
+```
+
+### Define Options Explained
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `charset` | Character set for tables | `'utf8mb4'` |
+| `collate` | Collation for string comparisons | `'utf8mb4_general_ci'` |
+| `underscored` | Use snake_case for all auto-generated fields | `true` → `createdAt` becomes `created_at`, `userId` becomes `user_id` |
+| `freezeTableName` | Prevent table name pluralization | `true` → `User` table stays `User`, not `Users` |
+| `timestamps` | Add createdAt/updatedAt automatically | `true` |
+
+### Model Override Example
+
+Individual models can override global define options:
+
+```typescript
+// models/User.ts
+export const UserModel = (sequelize: Sequelize) => {
+  return User.init({
+    email: DataTypes.STRING,
+    firstName: DataTypes.STRING, // Will be first_name in DB with underscored: true
+  }, {
+    sequelize,
+    modelName: 'User',
+    // Global options apply, but you can override:
+    // freezeTableName: false, // Would override global setting
+    // underscored: false,     // Would override global setting
+  });
+};
+```
+
+## 📚 Examples
 
 Check out the [`example/`](./example) directory for complete working examples:
 

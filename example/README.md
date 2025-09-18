@@ -67,6 +67,7 @@ export const AnimationViewModel = (sequelize: Sequelize) => {
 
 ✅ Directory-based model loading  
 ✅ Factory function pattern support  
+✅ Sequelize define options (underscored, freezeTableName, charset, collate)  
 ✅ Automatic schema diffing  
 ✅ TypeScript migration generation  
 ✅ Migration execution and rollback

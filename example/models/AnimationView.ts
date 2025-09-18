@@ -8,6 +8,8 @@ export class AnimationView extends Model {
   public isActive!: boolean; // Another new field
   // Removed priority field
   public tags!: string; // Another newest field
+  // With underscored: true, these will be stored as created_at/updated_at in database
+  // but accessed as createdAt/updatedAt in JavaScript
   public createdAt!: Date;
   public updatedAt!: Date;
 }
@@ -50,8 +52,11 @@ export const AnimationViewModel = (sequelize: Sequelize): typeof AnimationView =
   }, {
     sequelize,
     modelName: 'AnimationView',
-    tableName: 'animation_views',
-    timestamps: true,
+    // With freezeTableName: true, table name will be 'AnimationView' (not pluralized)
+    // With underscored: true, timestamps will be 'created_at', 'updated_at' (not camelCase)
+    // Note: Individual model options can override global define options
+    tableName: 'AnimationView', // Explicit table name (respects freezeTableName setting)
+    timestamps: true, // Will create created_at and updated_at due to underscored: true
   });
   
   return AnimationView;

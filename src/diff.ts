@@ -27,6 +27,46 @@ export class SchemaDiffer {
     this.dialectHandler = this.createDialectHandler();
   }
 
+  /**
+   * Check if underscored option is enabled in Sequelize define options
+   */
+  private isUnderscored(): boolean {
+    const sequelize = this.sequelize as any;
+    return sequelize.options?.define?.underscored === true ||
+           sequelize.config?.define?.underscored === true;
+  }
+
+  /**
+   * Convert camelCase to snake_case when underscored is enabled
+   */
+  private getActualColumnName(modelColumnName: string): string {
+    if (!this.isUnderscored()) {
+      return modelColumnName;
+    }
+    
+    // Convert camelCase to snake_case
+    return modelColumnName.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+  }
+
+  /**
+   * Find the database column name that corresponds to a model column name
+   */
+  private findDbColumnName(modelColumnName: string, dbColumnNames: string[]): string | null {
+    const actualColumnName = this.getActualColumnName(modelColumnName);
+    
+    // Check exact match first
+    if (dbColumnNames.includes(actualColumnName)) {
+      return actualColumnName;
+    }
+    
+    // Check original name (for backwards compatibility)
+    if (dbColumnNames.includes(modelColumnName)) {
+      return modelColumnName;
+    }
+    
+    return null;
+  }
+
   private createDialectHandler(): DatabaseDialectHandler {
     switch (this.dialect) {
       case 'postgres':
@@ -128,7 +168,6 @@ export class SchemaDiffer {
 
   private async getExistingTables(): Promise<string[]> {
     try {
-      console.log(`[DEBUG] Checking existing tables for ${this.dialect}...`);
       
       let tables: string[] = [];
       
@@ -144,9 +183,7 @@ export class SchemaDiffer {
             ORDER BY table_name;
           `);
           tables = (results as any[]).map(row => row.table_name);
-          console.log(`[DEBUG] PostgreSQL direct query found ${tables.length} tables:`, tables);
         } catch (error) {
-          console.log(`[DEBUG] PostgreSQL direct query failed:`, typeof error === 'object' && error !== null && 'message' in error ? (error as any).message : error);
         }
       }
       
@@ -154,8 +191,6 @@ export class SchemaDiffer {
       if (tables.length === 0) {
         try {
           const rawTables = await this.queryInterface.showAllTables();
-          console.log(`[DEBUG] showAllTables() returned:`, rawTables);
-          console.log(`[DEBUG] Type: ${typeof rawTables}, IsArray: ${Array.isArray(rawTables)}`);
           
           if (Array.isArray(rawTables)) {
             tables = rawTables.map(table => {
@@ -169,29 +204,23 @@ export class SchemaDiffer {
               return String(table);
             });
           }
-          console.log(`[DEBUG] Processed showAllTables result:`, tables);
         } catch (error) {
-          console.log(`[DEBUG] showAllTables() failed:`, typeof error === 'object' && error !== null && 'message' in error ? (error as any).message : error);
         }
       }
       
       // Filter system tables
       const filteredTables = this.dialectHandler.filterSystemTables(tables);
-      console.log(`[DEBUG] After filtering system tables:`, filteredTables);
       
       // Final validation - check if we can describe at least one table
       if (filteredTables.length > 0) {
         try {
           const testTable = filteredTables[0];
           const description = await this.queryInterface.describeTable(testTable);
-          console.log(`[DEBUG] Successfully described table ${testTable}:`, Object.keys(description));
         } catch (error) {
-          console.log(`[DEBUG] Warning: Could not describe table ${filteredTables[0]}:`, typeof error === 'object' && error !== null && 'message' in error ? (error as any).message : error);
           // If we can't describe any table, maybe they don't exist
           if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as any).message === 'string') {
             const errMsg = (error as any).message;
             if (errMsg.includes('does not exist') || errMsg.includes('doesn\'t exist')) {
-              console.log(`[DEBUG] Tables don't seem to exist, returning empty array`);
               return [];
             }
           }
@@ -232,25 +261,29 @@ export class SchemaDiffer {
       const existingColumnNames = Object.keys(existingColumns);
       const modelColumnNames = Object.keys(modelAttributes);
       
-      // Check for new columns
-      for (const columnName of modelColumnNames) {
-        if (!existingColumnNames.includes(columnName)) {
-          this.log(`Column ${columnName} is new (not in DB)`);
+      // Check for new columns and column changes
+      for (const modelColumnName of modelColumnNames) {
+        const dbColumnName = this.findDbColumnName(modelColumnName, existingColumnNames);
+        
+        if (!dbColumnName) {
+          // Column doesn't exist in database
+          this.log(`Column ${modelColumnName} is new (not in DB)`);
           differences.push({
-            column: columnName,
+            column: modelColumnName,
             action: 'add',
-            to: this.convertAttributeToQueryInterface(modelAttributes[columnName])
+            to: this.convertAttributeToQueryInterface(modelAttributes[modelColumnName])
           });
         } else {
-          const existingColumn = existingColumns[columnName];
-          const modelColumn = modelAttributes[columnName];
+          // Column exists, check for changes
+          const existingColumn = existingColumns[dbColumnName];
+          const modelColumn = modelAttributes[modelColumnName];
           
-          this.log(`Checking column ${columnName} for changes...`);
+          this.log(`Checking column ${modelColumnName} (DB: ${dbColumnName}) for changes...`);
           
           if (this.hasColumnChanged(existingColumn, modelColumn)) {
-            this.log(`Column ${columnName} has changed`);
+            this.log(`Column ${modelColumnName} has changed`);
             differences.push({
-              column: columnName,
+              column: modelColumnName,
               action: 'change',
               from: existingColumn,
               to: this.convertAttributeToQueryInterface(modelColumn)
@@ -260,13 +293,19 @@ export class SchemaDiffer {
       }
       
       // Check for columns to remove
-      for (const columnName of existingColumnNames) {
-        if (!modelColumnNames.includes(columnName)) {
-          this.log(`Column ${columnName} should be removed (not in model)`);
+      for (const dbColumnName of existingColumnNames) {
+        // Check if this DB column corresponds to any model column
+        const hasCorrespondingModelColumn = modelColumnNames.some(modelColumnName => {
+          const correspondingDbColumn = this.findDbColumnName(modelColumnName, existingColumnNames);
+          return correspondingDbColumn === dbColumnName;
+        });
+        
+        if (!hasCorrespondingModelColumn) {
+          this.log(`Column ${dbColumnName} exists in DB but not in model, will remove`);
           differences.push({
-            column: columnName,
+            column: dbColumnName,
             action: 'remove',
-            from: existingColumns[columnName]
+            from: existingColumns[dbColumnName]
           });
         }
       }
@@ -351,16 +390,22 @@ export class SchemaDiffer {
     if (!existingAI && !modelAI && !existingPK) {
       let existingDefault = this.dialectHandler.normalizeDefaultValue(existingColumn.defaultValue);
       let modelDefault = this.dialectHandler.normalizeDefaultValue(modelColumn.defaultValue);
+      
       // Treat null, undefined, empty object, and missing as equivalent
       const isEmpty = (v: any) => v === null || v === undefined || (typeof v === 'object' && v && Object.keys(v).length === 0);
       if (isEmpty(existingDefault) && isEmpty(modelDefault)) {
         existingDefault = modelDefault = null;
       }
-      // Ignore default value differences for JSON/array columns
-      const ignoreDefaultTypes = ['json', 'jsonb', 'json[]', 'varchar[]', 'text[]', 'array'];
-      if (!ignoreDefaultTypes.includes(typeStr)) {
+      
+      // Ignore default value differences for special column types
+      const ignoreDefaultTypes = ['json', 'jsonb', 'json[]', 'varchar[]', 'text[]', 'array', 'timestamptz', 'date', 'datetime', 'timestamp'];
+      const isTimestampType = typeStr.includes('date') || typeStr.includes('time') || typeStr.includes('timestamp');
+      
+      // Skip default value comparison for timestamp columns (created_at, updated_at)
+      // These often have auto-generated defaults that vary between DB and model
+      if (!ignoreDefaultTypes.includes(typeStr) && !isTimestampType) {
         if (existingDefault !== modelDefault) {
-          this.log(`[POSTGRES] Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
+          this.log(`Default value difference: existing=${JSON.stringify(existingDefault)}, model=${JSON.stringify(modelDefault)}`);
           return true;
         }
       }
@@ -652,9 +697,9 @@ class SQLiteHandler implements DatabaseDialectHandler {
       'blob': 'blob',
       'numeric': 'numeric',
       'boolean': 'boolean',
-      'datetime': 'datetime',
-      'date': 'date',
-      'time': 'time',
+      'datetime': 'timestamptz', // Match what getTypeString returns for DataTypes.DATE
+      'date': 'timestamptz',
+      'time': 'timestamptz',
       'varchar': 'varchar',
       'char': 'char',
       'decimal': 'decimal',
