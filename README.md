@@ -13,6 +13,9 @@
 - 📝 **TypeScript Support** - Full TypeScript support with type definitions
 - 🎯 **Powered by Umzug** - Built on the reliable Umzug migration framework
 - 🛠️ **Production Ready** - Handles complex schema changes, foreign keys, and more
+- 📁 **Directory-based Loading** - Auto-discover models from directories
+- 🔍 **Dry-run Mode** - Preview changes before generating migrations
+- 🎲 **Smart Naming** - Auto-generates migration names when not provided
 
 ## 🚀 Quick Start
 
@@ -40,15 +43,18 @@ import { Post } from './models/Post';
 
 const sequelize = new Sequelize({
   dialect: 'postgres', // or 'mysql', 'sqlite', etc.
+  host: 'localhost',
   database: 'myapp',
   username: 'user',
   password: 'password',
-  host: 'localhost',
 });
 
 const config: SchemaSyncConfig = {
   sequelize,
+  // Option 1: Provide models array directly
   models: [User, Post],
+  // Option 2: Auto-discover from directory (recommended)
+  // modelsPath: './models',
   migrationsPath: './migrations',
 };
 
@@ -72,7 +78,12 @@ Generate a new migration based on model changes
 ```bash
 npx sequelize-schema-sync generate
 npx sequelize-schema-sync generate --name "add_user_avatar"
+npx sequelize-schema-sync generate --dry-run
 ```
+
+**Options:**
+- `-n, --name <name>` - Custom migration name
+- `--dry-run` - Preview changes without generating files
 
 ### `migrate`
 Run all pending migrations
@@ -87,7 +98,7 @@ npx sequelize-schema-sync rollback
 ```
 
 ### `status`
-Show migration status (coming soon)
+Show migration status
 ```bash
 npx sequelize-schema-sync status
 ```
@@ -114,83 +125,127 @@ When you change your models, the tool generates migrations like this:
 import { QueryInterface, DataTypes } from 'sequelize';
 
 export async function up(queryInterface: QueryInterface): Promise<void> {
-  await queryInterface.createTable('Users', {
-    id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
-    name: { type: DataTypes.STRING, allowNull: false },
-    email: { type: DataTypes.STRING, allowNull: false, unique: true },
-    createdAt: { type: DataTypes.DATE, allowNull: false },
-    updatedAt: { type: DataTypes.DATE, allowNull: false }
-  });
-
-  await queryInterface.addColumn('Posts', 'userId', {
-    type: DataTypes.INTEGER,
-    allowNull: false,
-    references: { model: 'Users', key: 'id' }
+  await queryInterface.createTable('users', {
+    id: {
+      type: DataTypes.INTEGER,
+      primaryKey: true,
+      autoIncrement: true,
+      allowNull: false
+    },
+    email: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      unique: true
+    },
+    createdAt: {
+      type: DataTypes.DATE,
+      allowNull: false
+    },
+    updatedAt: {
+      type: DataTypes.DATE,
+      allowNull: false
+    }
   });
 }
 
 export async function down(queryInterface: QueryInterface): Promise<void> {
-  await queryInterface.removeColumn('Posts', 'userId');
-  await queryInterface.dropTable('Users');
+  await queryInterface.dropTable('users');
 }
 ```
 
-## ⚙️ Configuration
+## 📁 Model Loading Options
 
-### SchemaSyncConfig
+### Option 1: Direct Model Array (Simple)
+```typescript
+const config: SchemaSyncConfig = {
+  sequelize,
+  models: [User, Post, Comment], // Import and list your models
+  migrationsPath: './migrations',
+};
+```
+
+### Option 2: Directory-based Loading (Recommended)
+```typescript
+const config: SchemaSyncConfig = {
+  sequelize,
+  modelsPath: './models', // Auto-discover models from directory
+  migrationsPath: './migrations',
+};
+```
+
+**Model Factory Pattern:**
+```typescript
+// models/User.ts
+export const UserModel = (sequelize: Sequelize) => {
+  const User = sequelize.define('User', {
+    email: DataTypes.STRING,
+    name: DataTypes.STRING,
+  });
+
+  return User;
+};
+```
+
+## 🔍 Dry-run Mode
+
+Preview what changes will be made before generating migrations:
+
+```bash
+npx sequelize-schema-sync generate --dry-run
+```
+
+**Example Output:**
+```
+📊 Schema Analysis Results:
+==================================================
+Found 2 table(s) with changes:
+
+📄 Table: users
+   Action: alter
+   → Will modify 2 column(s):
+     - email: change
+     - avatar: add
+
+📄 Table: posts
+   Action: create
+   → Will create table with 5 columns: id, title, content, userId, createdAt
+
+💡 To generate the migration file, run without --dry-run flag
+```
+
+## 🎯 Supported Schema Changes
+
+- ✅ Create new tables
+- ✅ Drop tables
+- ✅ Add columns
+- ✅ Remove columns
+- ✅ Change column types
+- ✅ Add/remove primary keys
+- ✅ Add/remove auto-increment
+- ✅ Add/remove unique constraints
+- ✅ Change default values
+- ✅ Add/remove foreign keys
+
+## 🛠️ Advanced Configuration
 
 ```typescript
-interface SchemaSyncConfig {
-  sequelize: Sequelize;           // Your Sequelize instance
-  models: ModelStatic<Model>[];   // Array of your models
-  migrationsPath?: string;        // Path to migrations folder (default: './migrations')
-  configPath?: string;            // Custom config path
-}
+const config: SchemaSyncConfig = {
+  sequelize,
+  modelsPath: './models',
+  migrationsPath: './migrations',
+  // Optional: Custom config path
+  configPath: './custom-config.ts',
+};
 ```
 
-## 🎯 Supported Operations
+## � Examples
 
-- ✅ **Create tables** - When you add new models
-- ✅ **Drop tables** - When you remove models
-- ✅ **Add columns** - When you add new fields to models
-- ✅ **Remove columns** - When you remove fields from models
-- ✅ **Change columns** - When you modify field types, constraints, etc.
-- ✅ **Foreign keys** - Automatic handling of references
-- ✅ **Indexes and constraints** - Primary keys, unique constraints, etc.
+Check out the [`example/`](./example) directory for complete working examples:
 
-## 🔧 Advanced Usage
-
-### Custom Migration Names
-
-```bash
-npx sequelize-schema-sync generate --name "add_user_preferences"
-```
-
-### Different Environments
-
-You can have different config files for different environments:
-
-```bash
-# Development
-npx sequelize-schema-sync generate --config schema-sync.dev.config.ts
-
-# Production  
-npx sequelize-schema-sync migrate --config schema-sync.prod.config.ts
-```
-
-## 📁 Project Structure
-
-```
-your-project/
-├── models/
-│   ├── User.ts
-│   └── Post.ts
-├── migrations/           # Auto-generated migrations
-│   ├── 20231201120000_initial_migration.ts
-│   └── 20231201130000_add_user_avatar.ts
-├── schema-sync.config.ts # Your configuration
-└── package.json
-```
+- Directory-based model loading
+- Factory function patterns
+- TypeScript migration generation
+- Migration execution and rollback
 
 ## 🤝 Contributing
 
@@ -198,14 +253,10 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📄 License
 
-MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙋‍♂️ Support
+## � Acknowledgments
 
-- 📚 [Full Documentation](https://github.com/yourusername/sequelize-schema-sync#readme)
-- 🐛 [Bug Reports](https://github.com/yourusername/sequelize-schema-sync/issues)
-- 💬 [Discussions](https://github.com/yourusername/sequelize-schema-sync/discussions)
-
----
-
-**Made with ❤️ for the Sequelize community**
+- Built on top of [Umzug](https://github.com/sequelize/umzug) for migration management
+- Inspired by [Drizzle ORM](https://orm.drizzle.team/) migration approach
+- Powered by [Sequelize](https://sequelize.org/)
